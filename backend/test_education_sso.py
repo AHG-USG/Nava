@@ -60,6 +60,24 @@ class EducationSSOTests(unittest.TestCase):
         self.assertEqual(self.client.get("/sso/education?token=" + token).status_code, 302)
         self.assertEqual(self.client.get("/sso/education?token=" + token).status_code, 409)
 
+
+    def test_link_callback_is_signed_for_current_nava_user(self):
+        with self.client.session_transaction() as sess:
+            sess["username"] = "amir_goli"
+        response = self.client.get("/sso/education/link?state=education-state-123")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("notebookga-usg.onrender.com/education/nava/link/complete", response.headers["Location"])
+        token = response.headers["Location"].split("token=", 1)[1]
+        encoded, signature = token.split(".", 1)
+        expected = base64.urlsafe_b64encode(
+            hmac.new(self.secret.encode(), encoded.encode(), hashlib.sha256).digest()
+        ).decode().rstrip("=")
+        self.assertEqual(signature, expected)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        self.assertEqual(payload["sub"], "amir_goli")
+        self.assertEqual(payload["state"], "education-state-123")
+        self.assertEqual(payload["iss"], "nava")
+
     def test_unknown_account_is_not_created(self):
         response = self.client.get("/sso/education?token=" + self.make_token("missing_user"))
         self.assertEqual(response.status_code, 403)
