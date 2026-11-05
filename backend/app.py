@@ -23,6 +23,7 @@ import uuid
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from flask import (
     Flask, request, jsonify, session, send_from_directory, g, abort, redirect
@@ -476,6 +477,35 @@ def education_sso_login():
     session.clear()
     session["username"] = username
     return redirect("/")
+
+
+
+
+@app.get("/sso/education/link")
+def education_sso_link():
+    """Confirm the currently authenticated Nava identity to the Education portal."""
+    username = require_auth()
+    secret = os.environ.get("NAVA_EDU_SSO_SECRET", "").strip()
+    education_base = os.environ.get("EDUCATION_BASE_URL", "").strip().rstrip("/")
+    state = (request.args.get("state") or "").strip()
+    if (not secret or len(secret) < 32 or not education_base.startswith("https://")
+            or not state or len(state) > 128):
+        abort(503, description="اتصال امن پرتال آموزشی پیکربندی نشده است.")
+    payload = {
+        "sub": username,
+        "iss": "nava",
+        "exp": int(time.time()) + 120,
+        "jti": uuid.uuid4().hex,
+        "state": state,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    token = encoded + "." + signature
+    return redirect(education_base + "/education/nava/link/complete?token=" + quote(token, safe=""))
 
 
 @app.get("/api/auth/me")
