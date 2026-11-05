@@ -25,7 +25,7 @@ import threading
 from datetime import datetime, timezone
 
 from flask import (
-    Flask, request, jsonify, session, send_from_directory, g, abort
+    Flask, request, jsonify, session, send_from_directory, g, abort, redirect
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
