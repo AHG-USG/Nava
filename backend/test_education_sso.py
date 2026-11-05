@@ -20,7 +20,7 @@ class EducationSSOTests(unittest.TestCase):
         self.old_db_path = nava.DB_PATH
         nava.DB_PATH = self.db_path
         self.secret = "test-secret-that-is-long-enough-for-sso-123456"
-        self.env = patch.dict(os.environ, {"NAVA_EDU_SSO_SECRET": self.secret})
+        self.env = patch.dict(os.environ, {"NAVA_EDU_SSO_SECRET": self.secret, "EDUCATION_BASE_URL": "https://notebookga-usg.onrender.com"})
         self.env.start()
         nava.init_db()
         with sqlite3.connect(self.db_path) as db:
