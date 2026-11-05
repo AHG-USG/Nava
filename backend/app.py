@@ -12,6 +12,10 @@ Environment variables (see ../.env.example):
     DEBUG        - "1" to enable Flask debug mode (never use in production)
 """
 import os
+import base64
+import hashlib
+import hmac
+import json
 import re
 import io
 import time
@@ -19,9 +23,10 @@ import uuid
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from flask import (
-    Flask, request, jsonify, session, send_from_directory, g, abort
+    Flask, request, jsonify, session, send_from_directory, g, abort, redirect
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
@@ -125,6 +130,12 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_convo ON messages(convo, created_at);
+CREATE TABLE IF NOT EXISTS education_sso_nonces (
+    jti TEXT PRIMARY KEY,
+    expires_at REAL NOT NULL,
+    consumed_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_education_sso_expiry ON education_sso_nonces(expires_at);
 """
 
 
@@ -411,6 +422,90 @@ def login():
 def logout():
     session.clear()
     return jsonify(ok=True)
+
+
+
+
+# ---------------------------------------------------------- education SSO
+def _decode_urlsafe(value):
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+@app.get("/sso/education")
+def education_sso_login():
+    """Consume a short-lived, single-use HMAC token issued by Goli-Abad Education."""
+    secret = os.environ.get("NAVA_EDU_SSO_SECRET", "").strip()
+    token = (request.args.get("token") or "").strip()
+    if not secret or len(secret) < 32 or not token:
+        abort(404)
+    parts = token.split(".")
+    if len(parts) != 2:
+        abort(400, description="درخواست ورود یکپارچه معتبر نیست.")
+    encoded, supplied_sig = parts
+    expected_sig = base64.urlsafe_b64encode(
+        hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(supplied_sig, expected_sig):
+        abort(401, description="امضای ورود یکپارچه معتبر نیست.")
+    try:
+        payload = json.loads(_decode_urlsafe(encoded).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        abort(400, description="توکن ورود قابل خواندن نیست.")
+    now = time.time()
+    username = str(payload.get("sub", "")).strip().lower()
+    jti = str(payload.get("jti", "")).strip()
+    try:
+        expires = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        expires = 0
+    if (payload.get("iss") != "goli-abad-education" or not validate_username(username)
+            or not jti or len(jti) > 128 or expires < now or expires > now + 90):
+        abort(401, description="توکن ورود منقضی یا نامعتبر است.")
+    db = get_db()
+    row = user_row(db, username)
+    if not row or username in DEMO_BOTS:
+        abort(403, description="ابتدا باید حساب واقعی و موجود Nava را به پرتال آموزشی متصل کنید.")
+    try:
+        db.execute("DELETE FROM education_sso_nonces WHERE expires_at < ?", (now,))
+        db.execute(
+            "INSERT INTO education_sso_nonces(jti,expires_at,consumed_at) VALUES(?,?,?)",
+            (jti, expires, now),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        abort(409, description="این لینک ورود قبلاً استفاده شده است.")
+    session.clear()
+    session["username"] = username
+    return redirect("/")
+
+
+
+
+@app.get("/sso/education/link")
+def education_sso_link():
+    """Confirm the currently authenticated Nava identity to the Education portal."""
+    username = require_auth()
+    secret = os.environ.get("NAVA_EDU_SSO_SECRET", "").strip()
+    education_base = os.environ.get("EDUCATION_BASE_URL", "").strip().rstrip("/")
+    state = (request.args.get("state") or "").strip()
+    if (not secret or len(secret) < 32 or not education_base.startswith("https://")
+            or not state or len(state) > 128):
+        abort(503, description="اتصال امن پرتال آموزشی پیکربندی نشده است.")
+    payload = {
+        "sub": username,
+        "iss": "nava",
+        "exp": int(time.time()) + 120,
+        "jti": uuid.uuid4().hex,
+        "state": state,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    token = encoded + "." + signature
+    return redirect(education_base + "/education/nava/link/complete?token=" + quote(token, safe=""))
 
 
 @app.get("/api/auth/me")
